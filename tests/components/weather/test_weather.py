@@ -7,7 +7,7 @@ from homeassistant.components.weather import (
     ATTR_WEATHER_PRESSURE, ATTR_WEATHER_TEMPERATURE, ATTR_WEATHER_WIND_BEARING,
     ATTR_WEATHER_WIND_SPEED, ATTR_FORECAST, ATTR_FORECAST_TEMP)
 from homeassistant.util.unit_system import METRIC_SYSTEM
-from homeassistant.bootstrap import setup_component
+from homeassistant.setup import setup_component
 
 from tests.common import get_test_home_assistant
 
@@ -37,7 +37,7 @@ class TestWeather(unittest.TestCase):
         assert state.state == 'sunny'
 
         data = state.attributes
-        assert data.get(ATTR_WEATHER_TEMPERATURE) == 21
+        assert data.get(ATTR_WEATHER_TEMPERATURE) == 21.6
         assert data.get(ATTR_WEATHER_HUMIDITY) == 92
         assert data.get(ATTR_WEATHER_PRESSURE) == 1099
         assert data.get(ATTR_WEATHER_WIND_SPEED) == 0.5
@@ -57,4 +57,4 @@ class TestWeather(unittest.TestCase):
         assert state.state == 'rainy'
 
         data = state.attributes
-        assert data.get(ATTR_WEATHER_TEMPERATURE) == -24.4
+        assert data.get(ATTR_WEATHER_TEMPERATURE) == -24

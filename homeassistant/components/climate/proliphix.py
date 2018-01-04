@@ -8,7 +8,7 @@ import voluptuous as vol
 
 from homeassistant.components.climate import (
     PRECISION_TENTHS, STATE_COOL, STATE_HEAT, STATE_IDLE,
-    ClimateDevice, PLATFORM_SCHEMA)
+    ClimateDevice, PLATFORM_SCHEMA, SUPPORT_TARGET_TEMPERATURE)
 from homeassistant.const import (
     CONF_HOST, CONF_PASSWORD, CONF_USERNAME, TEMP_FAHRENHEIT, ATTR_TEMPERATURE)
 import homeassistant.helpers.config_validation as cv
@@ -25,7 +25,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the Proliphix thermostats."""
+    """Set up the Proliphix thermostats."""
     username = config.get(CONF_USERNAME)
     password = config.get(CONF_PASSWORD)
     host = config.get(CONF_HOST)
@@ -43,13 +43,17 @@ class ProliphixThermostat(ClimateDevice):
     def __init__(self, pdp):
         """Initialize the thermostat."""
         self._pdp = pdp
-        # initial data
         self._pdp.update()
         self._name = self._pdp.name
 
     @property
+    def supported_features(self):
+        """Return the list of supported features."""
+        return SUPPORT_TARGET_TEMPERATURE
+
+    @property
     def should_poll(self):
-        """Polling needed for thermostat."""
+        """Set up polling needed for thermostat."""
         return True
 
     def update(self):

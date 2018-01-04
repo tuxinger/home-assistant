@@ -23,13 +23,12 @@ from homeassistant.const import (
     STATE_PAUSED, STATE_PLAYING, STATE_UNKNOWN, CONF_PORT)
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util.dt import utcnow
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PORT = 9000
 TIMEOUT = 10
-
-KNOWN_DEVICES = []
 
 SUPPORT_SQUEEZEBOX = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | \
     SUPPORT_VOLUME_MUTE | SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | \
@@ -46,15 +45,15 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 @asyncio.coroutine
 def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    """Setup the squeezebox platform."""
+    """Set up the squeezebox platform."""
     import socket
 
     username = config.get(CONF_USERNAME)
     password = config.get(CONF_PASSWORD)
 
     if discovery_info is not None:
-        host = discovery_info[0]
-        port = None  # Port is not collected in netdisco 0.8.1
+        host = discovery_info.get("host")
+        port = discovery_info.get("port")
     else:
         host = config.get(CONF_HOST)
         port = config.get(CONF_PORT)
@@ -67,25 +66,15 @@ def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
     try:
         ipaddr = socket.gethostbyname(host)
     except (OSError) as error:
-        _LOGGER.error("Could not communicate with %s:%d: %s",
-                      host, port, error)
+        _LOGGER.error(
+            "Could not communicate with %s:%d: %s", host, port, error)
         return False
-
-    # Combine it with port to allow multiple servers at the same host
-    key = "{}:{}".format(ipaddr, port)
-
-    # Only add a media server once
-    if key in KNOWN_DEVICES:
-        return False
-    KNOWN_DEVICES.append(key)
 
     _LOGGER.debug("Creating LMS object for %s", ipaddr)
     lms = LogitechMediaServer(hass, host, port, username, password)
-    if lms is False:
-        return False
 
     players = yield from lms.create_players()
-    yield from async_add_devices(players)
+    async_add_devices(players)
 
     return True
 
@@ -106,8 +95,9 @@ class LogitechMediaServer(object):
         """Create a list of devices connected to LMS."""
         result = []
         data = yield from self.async_query('players', 'status')
-
-        for players in data['players_loop']:
+        if data is False:
+            return result
+        for players in data.get('players_loop', []):
             player = SqueezeBoxDevice(
                 self, players['playerid'], players['name'])
             yield from player.async_update()
@@ -117,7 +107,6 @@ class LogitechMediaServer(object):
     @asyncio.coroutine
     def async_query(self, *command, player=""):
         """Abstract out the JSON-RPC connection."""
-        response = None
         auth = None if self._username is None else aiohttp.BasicAuth(
             self._username, self._password)
         url = "http://{}:{}/jsonrpc.js".format(
@@ -138,22 +127,17 @@ class LogitechMediaServer(object):
                     data=data,
                     auth=auth)
 
-                if response.status == 200:
-                    data = yield from response.json()
-                else:
+                if response.status != 200:
                     _LOGGER.error(
                         "Query failed, response code: %s Full message: %s",
                         response.status, response)
                     return False
 
-        except (asyncio.TimeoutError,
-                aiohttp.errors.ClientError,
-                aiohttp.errors.ClientDisconnectedError) as error:
+                data = yield from response.json()
+
+        except (asyncio.TimeoutError, aiohttp.ClientError) as error:
             _LOGGER.error("Failed communicating with LMS: %s", type(error))
             return False
-        finally:
-            if response is not None:
-                yield from response.release()
 
         try:
             return data['result']
@@ -172,12 +156,18 @@ class SqueezeBoxDevice(MediaPlayerDevice):
         self._id = player_id
         self._status = {}
         self._name = name
+        self._last_update = None
         _LOGGER.debug("Creating SqueezeBox object: %s, %s", name, player_id)
 
     @property
     def name(self):
         """Return the name of the device."""
         return self._name
+
+    @property
+    def unique_id(self):
+        """Return an unique ID."""
+        return self._id
 
     @property
     def state(self):
@@ -212,7 +202,7 @@ class SqueezeBoxDevice(MediaPlayerDevice):
         if response is False:
             return
 
-        self._status = response.copy()
+        self._status = {}
 
         try:
             self._status.update(response["playlist_loop"][0])
@@ -222,6 +212,9 @@ class SqueezeBoxDevice(MediaPlayerDevice):
             self._status.update(response["remoteMeta"])
         except KeyError:
             pass
+
+        self._status.update(response)
+        self._last_update = utcnow()
 
     @property
     def volume_level(self):
@@ -251,6 +244,17 @@ class SqueezeBoxDevice(MediaPlayerDevice):
         """Duration of current playing media in seconds."""
         if 'duration' in self._status:
             return int(float(self._status['duration']))
+
+    @property
+    def media_position(self):
+        """Duration of current playing media in seconds."""
+        if 'time' in self._status:
+            return int(float(self._status['time']))
+
+    @property
+    def media_position_updated_at(self):
+        """Last time status was updated."""
+        return self._last_update
 
     @property
     def media_image_url(self):

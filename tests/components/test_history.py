@@ -4,7 +4,7 @@ from datetime import timedelta
 import unittest
 from unittest.mock import patch, sentinel
 
-from homeassistant.bootstrap import setup_component
+from homeassistant.setup import setup_component
 import homeassistant.core as ha
 import homeassistant.util.dt as dt_util
 from homeassistant.components import history, recorder
@@ -29,13 +29,12 @@ class TestComponentHistory(unittest.TestCase):
         """Initialize the recorder."""
         init_recorder_component(self.hass)
         self.hass.start()
-        recorder.get_instance().block_till_db_ready()
         self.wait_recording_done()
 
     def wait_recording_done(self):
         """Block till recording is done."""
         self.hass.block_till_done()
-        recorder.get_instance().block_till_done()
+        self.hass.data[recorder.DATA_INSTANCE].block_till_done()
 
     def test_setup(self):
         """Test setup method of history."""
@@ -87,12 +86,13 @@ class TestComponentHistory(unittest.TestCase):
 
         # Get states returns everything before POINT
         self.assertEqual(states,
-                         sorted(history.get_states(future),
+                         sorted(history.get_states(self.hass, future),
                                 key=lambda state: state.entity_id))
 
         # Test get_state here because we have a DB setup
         self.assertEqual(
-            states[0], history.get_state(future, states[0].entity_id))
+            states[0], history.get_state(self.hass, future,
+                                         states[0].entity_id))
 
     def test_state_changes_during_period(self):
         """Test state change during period."""
@@ -128,7 +128,8 @@ class TestComponentHistory(unittest.TestCase):
             set_state('Netflix')
             set_state('Plex')
 
-        hist = history.state_changes_during_period(start, end, entity_id)
+        hist = history.state_changes_during_period(
+            self.hass, start, end, entity_id)
 
         self.assertEqual(states, hist[entity_id])
 
@@ -141,7 +142,49 @@ class TestComponentHistory(unittest.TestCase):
         """
         zero, four, states = self.record_states()
         hist = history.get_significant_states(
-            zero, four, filters=history.Filters())
+            self.hass, zero, four, filters=history.Filters())
+        assert states == hist
+
+    def test_get_significant_states_with_initial(self):
+        """Test that only significant states are returned.
+
+        We should get back every thermostat change that
+        includes an attribute change, but only the state updates for
+        media player (attribute changes are not significant and not returned).
+        """
+        zero, four, states = self.record_states()
+        one = zero + timedelta(seconds=1)
+        one_and_half = zero + timedelta(seconds=1.5)
+        for entity_id in states:
+            if entity_id == 'media_player.test':
+                states[entity_id] = states[entity_id][1:]
+            for state in states[entity_id]:
+                if state.last_changed == one:
+                    state.last_changed = one_and_half
+
+        hist = history.get_significant_states(
+            self.hass, one_and_half, four, filters=history.Filters(),
+            include_start_time_state=True)
+        assert states == hist
+
+    def test_get_significant_states_without_initial(self):
+        """Test that only significant states are returned.
+
+        We should get back every thermostat change that
+        includes an attribute change, but only the state updates for
+        media player (attribute changes are not significant and not returned).
+        """
+        zero, four, states = self.record_states()
+        one = zero + timedelta(seconds=1)
+        one_and_half = zero + timedelta(seconds=1.5)
+        for entity_id in states:
+            states[entity_id] = list(filter(
+                lambda s: s.last_changed != one, states[entity_id]))
+        del states['media_player.test2']
+
+        hist = history.get_significant_states(
+            self.hass, one_and_half, four, filters=history.Filters(),
+            include_start_time_state=False)
         assert states == hist
 
     def test_get_significant_states_entity_id(self):
@@ -153,7 +196,19 @@ class TestComponentHistory(unittest.TestCase):
         del states['script.can_cancel_this_one']
 
         hist = history.get_significant_states(
-            zero, four, 'media_player.test',
+            self.hass, zero, four, ['media_player.test'],
+            filters=history.Filters())
+        assert states == hist
+
+    def test_get_significant_states_multiple_entity_ids(self):
+        """Test that only significant states are returned for one entity."""
+        zero, four, states = self.record_states()
+        del states['media_player.test2']
+        del states['thermostat.test2']
+        del states['script.can_cancel_this_one']
+
+        hist = history.get_significant_states(
+            self.hass, zero, four, ['media_player.test', 'thermostat.test'],
             filters=history.Filters())
         assert states == hist
 
@@ -355,7 +410,8 @@ class TestComponentHistory(unittest.TestCase):
             filters.included_entities = include[history.CONF_ENTITIES]
             filters.included_domains = include[history.CONF_DOMAINS]
 
-        hist = history.get_significant_states(zero, four, filters=filters)
+        hist = history.get_significant_states(
+            self.hass, zero, four, filters=filters)
         assert states == hist
 
     def record_states(self):

@@ -1,5 +1,5 @@
 """
-Component that will help set the ffmpeg component.
+Component that will help set the FFmpeg component.
 
 For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/ffmpeg/
@@ -14,17 +14,24 @@ from homeassistant.core import callback
 from homeassistant.const import (
     ATTR_ENTITY_ID, EVENT_HOMEASSISTANT_START, EVENT_HOMEASSISTANT_STOP)
 from homeassistant.config import load_yaml_config_file
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_send, async_dispatcher_connect)
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity import Entity
 
+REQUIREMENTS = ['ha-ffmpeg==1.9']
+
 DOMAIN = 'ffmpeg'
-REQUIREMENTS = ["ha-ffmpeg==1.5"]
 
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_START = 'start'
 SERVICE_STOP = 'stop'
 SERVICE_RESTART = 'restart'
+
+SIGNAL_FFMPEG_START = 'ffmpeg.start'
+SIGNAL_FFMPEG_STOP = 'ffmpeg.stop'
+SIGNAL_FFMPEG_RESTART = 'ffmpeg.restart'
 
 DATA_FFMPEG = 'ffmpeg'
 
@@ -50,27 +57,30 @@ SERVICE_FFMPEG_SCHEMA = vol.Schema({
 })
 
 
-def start(hass, entity_id=None):
-    """Start a ffmpeg process on entity."""
+@callback
+def async_start(hass, entity_id=None):
+    """Start a FFmpeg process on entity."""
     data = {ATTR_ENTITY_ID: entity_id} if entity_id else {}
-    hass.services.call(DOMAIN, SERVICE_START, data)
+    hass.async_add_job(hass.services.async_call(DOMAIN, SERVICE_START, data))
 
 
-def stop(hass, entity_id=None):
-    """Stop a ffmpeg process on entity."""
+@callback
+def async_stop(hass, entity_id=None):
+    """Stop a FFmpeg process on entity."""
     data = {ATTR_ENTITY_ID: entity_id} if entity_id else {}
-    hass.services.call(DOMAIN, SERVICE_STOP, data)
+    hass.async_add_job(hass.services.async_call(DOMAIN, SERVICE_STOP, data))
 
 
-def restart(hass, entity_id=None):
-    """Restart a ffmpeg process on entity."""
+@callback
+def async_restart(hass, entity_id=None):
+    """Restart a FFmpeg process on entity."""
     data = {ATTR_ENTITY_ID: entity_id} if entity_id else {}
-    hass.services.call(DOMAIN, SERVICE_RESTART, data)
+    hass.async_add_job(hass.services.async_call(DOMAIN, SERVICE_RESTART, data))
 
 
 @asyncio.coroutine
 def async_setup(hass, config):
-    """Setup the FFmpeg component."""
+    """Set up the FFmpeg component."""
     conf = config.get(DOMAIN, {})
 
     manager = FFmpegManager(
@@ -79,40 +89,22 @@ def async_setup(hass, config):
         conf.get(CONF_RUN_TEST, DEFAULT_RUN_TEST)
     )
 
-    descriptions = yield from hass.loop.run_in_executor(
-        None, load_yaml_config_file,
+    descriptions = yield from hass.async_add_job(
+        load_yaml_config_file,
         os.path.join(os.path.dirname(__file__), 'services.yaml'))
 
-    # register service
+    # Register service
     @asyncio.coroutine
     def async_service_handle(service):
         """Handle service ffmpeg process."""
         entity_ids = service.data.get(ATTR_ENTITY_ID)
 
-        if entity_ids:
-            devices = [device for device in manager.entities
-                       if device.entity_id in entity_ids]
+        if service.service == SERVICE_START:
+            async_dispatcher_send(hass, SIGNAL_FFMPEG_START, entity_ids)
+        elif service.service == SERVICE_STOP:
+            async_dispatcher_send(hass, SIGNAL_FFMPEG_STOP, entity_ids)
         else:
-            devices = manager.entities
-
-        tasks = []
-        for device in devices:
-            if service.service == SERVICE_START:
-                tasks.append(device.async_start_ffmpeg())
-            elif service.service == SERVICE_STOP:
-                tasks.append(device.async_stop_ffmpeg())
-            else:
-                tasks.append(device.async_restart_ffmpeg())
-
-        if tasks:
-            yield from asyncio.wait(tasks, loop=hass.loop)
-
-        tasks.clear()
-        for device in devices:
-            tasks.append(device.async_update_ha_state())
-
-        if tasks:
-            yield from asyncio.wait(tasks, loop=hass.loop)
+            async_dispatcher_send(hass, SIGNAL_FFMPEG_RESTART, entity_ids)
 
     hass.services.async_register(
         DOMAIN, SERVICE_START, async_service_handle,
@@ -140,41 +132,11 @@ class FFmpegManager(object):
         self._cache = {}
         self._bin = ffmpeg_bin
         self._run_test = run_test
-        self._entities = []
 
     @property
     def binary(self):
         """Return ffmpeg binary from config."""
         return self._bin
-
-    @property
-    def entities(self):
-        """Return ffmpeg entities for services."""
-        return self._entities
-
-    @callback
-    def async_register_device(self, device):
-        """Register a ffmpeg process/device."""
-        self._entities.append(device)
-
-        @asyncio.coroutine
-        def async_shutdown(event):
-            """Stop ffmpeg process."""
-            yield from device.async_stop_ffmpeg()
-
-        self.hass.bus.async_listen_once(
-            EVENT_HOMEASSISTANT_STOP, async_shutdown)
-
-        # start on startup
-        if device.initial_state:
-            @asyncio.coroutine
-            def async_start(event):
-                """Start ffmpeg process."""
-                yield from device.async_start_ffmpeg()
-                yield from device.async_update_ha_state()
-
-            self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_START, async_start)
 
     @asyncio.coroutine
     def async_run_test(self, input_source):
@@ -201,12 +163,28 @@ class FFmpegManager(object):
 
 
 class FFmpegBase(Entity):
-    """Interface object for ffmpeg."""
+    """Interface object for FFmpeg."""
 
     def __init__(self, initial_state=True):
         """Initialize ffmpeg base object."""
         self.ffmpeg = None
         self.initial_state = initial_state
+
+    @asyncio.coroutine
+    def async_added_to_hass(self):
+        """Register dispatcher & events.
+
+        This method is a coroutine.
+        """
+        async_dispatcher_connect(
+            self.hass, SIGNAL_FFMPEG_START, self._async_start_ffmpeg)
+        async_dispatcher_connect(
+            self.hass, SIGNAL_FFMPEG_STOP, self._async_stop_ffmpeg)
+        async_dispatcher_connect(
+            self.hass, SIGNAL_FFMPEG_RESTART, self._async_restart_ffmpeg)
+
+        # register start/stop
+        self._async_register_events()
 
     @property
     def available(self):
@@ -218,22 +196,53 @@ class FFmpegBase(Entity):
         """Return True if entity has to be polled for state."""
         return False
 
-    def async_start_ffmpeg(self):
-        """Start a ffmpeg process.
+    @asyncio.coroutine
+    def _async_start_ffmpeg(self, entity_ids):
+        """Start a FFmpeg process.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method is a coroutine.
         """
         raise NotImplementedError()
 
-    def async_stop_ffmpeg(self):
-        """Stop a ffmpeg process.
+    @asyncio.coroutine
+    def _async_stop_ffmpeg(self, entity_ids):
+        """Stop a FFmpeg process.
 
-        This method must be run in the event loop and returns a coroutine.
+        This method is a coroutine.
         """
-        return self.ffmpeg.close()
+        if entity_ids is None or self.entity_id in entity_ids:
+            yield from self.ffmpeg.close()
 
     @asyncio.coroutine
-    def async_restart_ffmpeg(self):
-        """Stop a ffmpeg process."""
-        yield from self.async_stop_ffmpeg()
-        yield from self.async_start_ffmpeg()
+    def _async_restart_ffmpeg(self, entity_ids):
+        """Stop a FFmpeg process.
+
+        This method is a coroutine.
+        """
+        if entity_ids is None or self.entity_id in entity_ids:
+            yield from self._async_stop_ffmpeg(None)
+            yield from self._async_start_ffmpeg(None)
+
+    @callback
+    def _async_register_events(self):
+        """Register a FFmpeg process/device."""
+        @asyncio.coroutine
+        def async_shutdown_handle(event):
+            """Stop FFmpeg process."""
+            yield from self._async_stop_ffmpeg(None)
+
+        self.hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, async_shutdown_handle)
+
+        # start on startup
+        if not self.initial_state:
+            return
+
+        @asyncio.coroutine
+        def async_start_handle(event):
+            """Start FFmpeg process."""
+            yield from self._async_start_ffmpeg(None)
+            self.async_schedule_update_ha_state()
+
+        self.hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_START, async_start_handle)

@@ -4,7 +4,6 @@ Component to make instant statistics about your history.
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.history_stats/
 """
-
 import datetime
 import logging
 import math
@@ -16,7 +15,8 @@ import homeassistant.helpers.config_validation as cv
 import homeassistant.util.dt as dt_util
 from homeassistant.components.sensor import PLATFORM_SCHEMA
 from homeassistant.const import (
-    CONF_NAME, CONF_ENTITY_ID, CONF_STATE, EVENT_HOMEASSISTANT_START)
+    CONF_NAME, CONF_ENTITY_ID, CONF_STATE, CONF_TYPE,
+    EVENT_HOMEASSISTANT_START)
 from homeassistant.exceptions import TemplateError
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import track_state_change
@@ -31,15 +31,20 @@ CONF_END = 'end'
 CONF_DURATION = 'duration'
 CONF_PERIOD_KEYS = [CONF_START, CONF_END, CONF_DURATION]
 
+CONF_TYPE_TIME = 'time'
+CONF_TYPE_RATIO = 'ratio'
+CONF_TYPE_COUNT = 'count'
+CONF_TYPE_KEYS = [CONF_TYPE_TIME, CONF_TYPE_RATIO, CONF_TYPE_COUNT]
+
 DEFAULT_NAME = 'unnamed statistics'
-UNIT = 'h'
-UNIT_RATIO = '%'
+UNITS = {
+    CONF_TYPE_TIME: 'h',
+    CONF_TYPE_RATIO: '%',
+    CONF_TYPE_COUNT: ''
+}
 ICON = 'mdi:chart-line'
 
-ATTR_START = 'from'
-ATTR_END = 'to'
 ATTR_VALUE = 'value'
-ATTR_RATIO = 'ratio'
 
 
 def exactly_two_period_keys(conf):
@@ -58,10 +63,11 @@ def exactly_two_period_keys(conf):
 
 PLATFORM_SCHEMA = vol.All(PLATFORM_SCHEMA.extend({
     vol.Required(CONF_ENTITY_ID): cv.entity_id,
-    vol.Required(CONF_STATE): cv.slug,
+    vol.Required(CONF_STATE): cv.string,
     vol.Optional(CONF_START, default=None): cv.template,
     vol.Optional(CONF_END, default=None): cv.template,
     vol.Optional(CONF_DURATION, default=None): cv.time_period,
+    vol.Optional(CONF_TYPE, default=CONF_TYPE_TIME): vol.In(CONF_TYPE_KEYS),
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
 }), exactly_two_period_keys)
 
@@ -74,14 +80,15 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     start = config.get(CONF_START)
     end = config.get(CONF_END)
     duration = config.get(CONF_DURATION)
+    sensor_type = config.get(CONF_TYPE)
     name = config.get(CONF_NAME)
 
     for template in [start, end]:
         if template is not None:
             template.hass = hass
 
-    add_devices([HistoryStatsSensor(
-        hass, entity_id, entity_state, start, end, duration, name)])
+    add_devices([HistoryStatsSensor(hass, entity_id, entity_state, start, end,
+                                    duration, sensor_type, name)])
 
     return True
 
@@ -90,7 +97,8 @@ class HistoryStatsSensor(Entity):
     """Representation of a HistoryStats sensor."""
 
     def __init__(
-            self, hass, entity_id, entity_state, start, end, duration, name):
+            self, hass, entity_id, entity_state, start, end, duration,
+            sensor_type, name):
         """Initialize the HistoryStats sensor."""
         self._hass = hass
 
@@ -99,11 +107,13 @@ class HistoryStatsSensor(Entity):
         self._duration = duration
         self._start = start
         self._end = end
+        self._type = sensor_type
         self._name = name
-        self._unit_of_measurement = UNIT
+        self._unit_of_measurement = UNITS[sensor_type]
 
         self._period = (datetime.datetime.now(), datetime.datetime.now())
         self.value = 0
+        self.count = 0
 
         def force_refresh(*args):
             """Force the component to refresh."""
@@ -123,7 +133,14 @@ class HistoryStatsSensor(Entity):
     @property
     def state(self):
         """Return the state of the sensor."""
-        return round(self.value, 2)
+        if self._type == CONF_TYPE_TIME:
+            return round(self.value, 2)
+
+        if self._type == CONF_TYPE_RATIO:
+            return HistoryStatsHelper.pretty_ratio(self.value, self._period)
+
+        if self._type == CONF_TYPE_COUNT:
+            return self.count
 
     @property
     def unit_of_measurement(self):
@@ -132,19 +149,15 @@ class HistoryStatsSensor(Entity):
 
     @property
     def should_poll(self):
-        """Polling required."""
+        """Return the polling state."""
         return True
 
     @property
     def device_state_attributes(self):
         """Return the state attributes of the sensor."""
-        start, end = self._period
         hsh = HistoryStatsHelper
         return {
             ATTR_VALUE: hsh.pretty_duration(self.value),
-            ATTR_RATIO: hsh.pretty_ratio(self.value, self._period),
-            ATTR_START: start.strftime('%Y-%m-%d %H:%M:%S'),
-            ATTR_END: end.strftime('%Y-%m-%d %H:%M:%S'),
         }
 
     @property
@@ -154,27 +167,48 @@ class HistoryStatsSensor(Entity):
 
     def update(self):
         """Get the latest data and updates the states."""
+        # Get previous values of start and end
+        p_start, p_end = self._period
+
         # Parse templates
         self.update_period()
         start, end = self._period
 
-        # Convert to UTC
+        # Convert times to UTC
         start = dt_util.as_utc(start)
         end = dt_util.as_utc(end)
+        p_start = dt_util.as_utc(p_start)
+        p_end = dt_util.as_utc(p_end)
+        now = datetime.datetime.now()
+
+        # Compute integer timestamps
+        start_timestamp = math.floor(dt_util.as_timestamp(start))
+        end_timestamp = math.floor(dt_util.as_timestamp(end))
+        p_start_timestamp = math.floor(dt_util.as_timestamp(p_start))
+        p_end_timestamp = math.floor(dt_util.as_timestamp(p_end))
+        now_timestamp = math.floor(dt_util.as_timestamp(now))
+
+        # If period has not changed and current time after the period end...
+        if start_timestamp == p_start_timestamp and \
+            end_timestamp == p_end_timestamp and \
+                end_timestamp <= now_timestamp:
+            # Don't compute anything as the value cannot have changed
+            return
 
         # Get history between start and end
         history_list = history.state_changes_during_period(
-            start, end, str(self._entity_id))
+            self.hass, start, end, str(self._entity_id))
 
         if self._entity_id not in history_list.keys():
             return
 
         # Get the first state
-        last_state = history.get_state(start, self._entity_id)
+        last_state = history.get_state(self.hass, start, self._entity_id)
         last_state = (last_state is not None and
                       last_state == self._entity_state)
-        last_time = dt_util.as_timestamp(start)
+        last_time = start_timestamp
         elapsed = 0
+        count = 0
 
         # Make calculations
         for item in history_list.get(self._entity_id):
@@ -183,12 +217,22 @@ class HistoryStatsSensor(Entity):
 
             if last_state:
                 elapsed += current_time - last_time
+            if current_state and not last_state:
+                count += 1
 
             last_state = current_state
             last_time = current_time
 
+        # Count time elapsed between last history state and end of measure
+        if last_state:
+            measure_end = min(end_timestamp, now_timestamp)
+            elapsed += measure_end - last_time
+
         # Save value in hours
         self.value = elapsed / 3600
+
+        # Save counter
+        self.count = count
 
     def update_period(self):
         """Parse the templates and store a datetime tuple in _period."""
@@ -208,8 +252,8 @@ class HistoryStatsSensor(Entity):
                     start = dt_util.as_local(dt_util.utc_from_timestamp(
                         math.floor(float(start_rendered))))
                 except ValueError:
-                    _LOGGER.error('PARSING ERROR: start must be a datetime'
-                                  ' or a timestamp.')
+                    _LOGGER.error("Parsing error: start must be a datetime"
+                                  "or a timestamp")
                     return
 
         # Parse end
@@ -225,8 +269,8 @@ class HistoryStatsSensor(Entity):
                     end = dt_util.as_local(dt_util.utc_from_timestamp(
                         math.floor(float(end_rendered))))
                 except ValueError:
-                    _LOGGER.error('PARSING ERROR: end must be a datetime'
-                                  ' or a timestamp.')
+                    _LOGGER.error("Parsing error: end must be a datetime "
+                                  "or a timestamp")
                     return
 
         # Calculate start or end using the duration
@@ -249,22 +293,19 @@ class HistoryStatsHelper:
         hours, seconds = divmod(seconds, 3600)
         minutes, seconds = divmod(seconds, 60)
         if days > 0:
-            return '%dd %dh %dm %ds' % (days, hours, minutes, seconds)
+            return '%dd %dh %dm' % (days, hours, minutes)
         elif hours > 0:
-            return '%dh %dm %ds' % (hours, minutes, seconds)
-        elif minutes > 0:
-            return '%dm %ds' % (minutes, seconds)
-        else:
-            return '%ds' % (seconds,)
+            return '%dh %dm' % (hours, minutes)
+        return '%dm' % minutes
 
     @staticmethod
     def pretty_ratio(value, period):
         """Format the ratio of value / period duration."""
         if len(period) != 2 or period[0] == period[1]:
-            return '0,0' + UNIT_RATIO
+            return 0.0
 
         ratio = 100 * 3600 * value / (period[1] - period[0]).total_seconds()
-        return str(round(ratio, 1)) + UNIT_RATIO
+        return round(ratio, 1)
 
     @staticmethod
     def handle_template_exception(ex, field):
@@ -274,5 +315,5 @@ class HistoryStatsHelper:
             # Common during HA startup - so just a warning
             _LOGGER.warning(ex)
             return
-        _LOGGER.error('Error parsing template for [' + field + ']')
+        _LOGGER.error("Error parsing template for field %s", field)
         _LOGGER.error(ex)

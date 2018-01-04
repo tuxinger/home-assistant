@@ -3,7 +3,7 @@ from unittest.mock import patch, PropertyMock
 
 from homeassistant.core import callback
 from homeassistant.const import ATTR_ENTITY_PICTURE
-from homeassistant.bootstrap import setup_component
+from homeassistant.setup import setup_component
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.components.http as http
 import homeassistant.components.image_processing as ip
@@ -24,7 +24,7 @@ class TestSetupImageProcessing(object):
         self.hass.stop()
 
     def test_setup_component(self):
-        """Setup demo platfrom on image_process component."""
+        """Setup demo platform on image_process component."""
         config = {
             ip.DOMAIN: {
                 'platform': 'demo'
@@ -35,7 +35,7 @@ class TestSetupImageProcessing(object):
             setup_component(self.hass, ip.DOMAIN, config)
 
     def test_setup_component_with_service(self):
-        """Setup demo platfrom on image_process component test service."""
+        """Setup demo platform on image_process component test service."""
         config = {
             ip.DOMAIN: {
                 'platform': 'demo'

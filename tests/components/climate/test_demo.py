@@ -4,7 +4,7 @@ import unittest
 from homeassistant.util.unit_system import (
     METRIC_SYSTEM
 )
-from homeassistant.bootstrap import setup_component
+from homeassistant.setup import setup_component
 from homeassistant.components import climate
 
 from tests.common import get_test_home_assistant
@@ -230,7 +230,7 @@ class TestDemoClimate(unittest.TestCase):
         self.assertEqual(None, state.attributes.get('hold_mode'))
 
     def test_set_aux_heat_bad_attr(self):
-        """Test setting the auxillary heater without required attribute."""
+        """Test setting the auxiliary heater without required attribute."""
         state = self.hass.states.get(ENTITY_CLIMATE)
         self.assertEqual('off', state.attributes.get('aux_heat'))
         climate.set_aux_heat(self.hass, None, ENTITY_CLIMATE)
@@ -245,7 +245,7 @@ class TestDemoClimate(unittest.TestCase):
         self.assertEqual('on', state.attributes.get('aux_heat'))
 
     def test_set_aux_heat_off(self):
-        """Test setting the auxillary heater off/false."""
+        """Test setting the auxiliary heater off/false."""
         climate.set_aux_heat(self.hass, False, ENTITY_CLIMATE)
         self.hass.block_till_done()
         state = self.hass.states.get(ENTITY_CLIMATE)

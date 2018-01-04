@@ -77,8 +77,11 @@ PLATFORM_SCHEMA = mqtt.MQTT_RW_PLATFORM_SCHEMA.extend({
 
 @asyncio.coroutine
 def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    """Setup MQTT fan platform."""
-    yield from async_add_devices([MqttFan(
+    """Set up the MQTT fan platform."""
+    if discovery_info is not None:
+        config = PLATFORM_SCHEMA(discovery_info)
+
+    async_add_devices([MqttFan(
         config.get(CONF_NAME),
         {
             key: config.get(key) for key in (
@@ -140,7 +143,7 @@ class MqttFan(FanEntity):
 
     @asyncio.coroutine
     def async_added_to_hass(self):
-        """Subscribe mqtt events.
+        """Subscribe to MQTT events.
 
         This method is a coroutine.
         """
@@ -154,13 +157,13 @@ class MqttFan(FanEntity):
 
         @callback
         def state_received(topic, payload, qos):
-            """A new MQTT message has been received."""
+            """Handle new received MQTT message."""
             payload = templates[CONF_STATE](payload)
             if payload == self._payload[STATE_ON]:
                 self._state = True
             elif payload == self._payload[STATE_OFF]:
                 self._state = False
-            self.hass.async_add_job(self.async_update_ha_state())
+            self.async_schedule_update_ha_state()
 
         if self._topic[CONF_STATE_TOPIC] is not None:
             yield from mqtt.async_subscribe(
@@ -169,7 +172,7 @@ class MqttFan(FanEntity):
 
         @callback
         def speed_received(topic, payload, qos):
-            """A new MQTT message for the speed has been received."""
+            """Handle new received MQTT message for the speed."""
             payload = templates[ATTR_SPEED](payload)
             if payload == self._payload[SPEED_LOW]:
                 self._speed = SPEED_LOW
@@ -177,29 +180,29 @@ class MqttFan(FanEntity):
                 self._speed = SPEED_MEDIUM
             elif payload == self._payload[SPEED_HIGH]:
                 self._speed = SPEED_HIGH
-            self.hass.async_add_job(self.async_update_ha_state())
+            self.async_schedule_update_ha_state()
 
         if self._topic[CONF_SPEED_STATE_TOPIC] is not None:
             yield from mqtt.async_subscribe(
                 self.hass, self._topic[CONF_SPEED_STATE_TOPIC], speed_received,
                 self._qos)
-        self._speed = SPEED_OFF
+            self._speed = SPEED_OFF
 
         @callback
         def oscillation_received(topic, payload, qos):
-            """A new MQTT message has been received."""
+            """Handle new received MQTT message for the oscillation."""
             payload = templates[OSCILLATION](payload)
             if payload == self._payload[OSCILLATE_ON_PAYLOAD]:
                 self._oscillation = True
             elif payload == self._payload[OSCILLATE_OFF_PAYLOAD]:
                 self._oscillation = False
-            self.hass.async_add_job(self.async_update_ha_state())
+            self.async_schedule_update_ha_state()
 
         if self._topic[CONF_OSCILLATION_STATE_TOPIC] is not None:
             yield from mqtt.async_subscribe(
                 self.hass, self._topic[CONF_OSCILLATION_STATE_TOPIC],
                 oscillation_received, self._qos)
-        self._oscillation = False
+            self._oscillation = False
 
     @property
     def should_poll(self):
@@ -287,7 +290,7 @@ class MqttFan(FanEntity):
 
         if self._optimistic_speed:
             self._speed = speed
-            self.hass.async_add_job(self.async_update_ha_state())
+            self.async_schedule_update_ha_state()
 
     @asyncio.coroutine
     def async_oscillate(self, oscillating: bool) -> None:
@@ -309,4 +312,4 @@ class MqttFan(FanEntity):
 
         if self._optimistic_oscillation:
             self._oscillation = oscillating
-            self.hass.async_add_job(self.async_update_ha_state())
+            self.async_schedule_update_ha_state()

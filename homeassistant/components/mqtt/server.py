@@ -13,7 +13,7 @@ import voluptuous as vol
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['hbmqtt==0.8']
+REQUIREMENTS = ['hbmqtt==0.9.1']
 DEPENDENCIES = ['http']
 
 # None allows custom config to be created through generate_config
@@ -47,7 +47,7 @@ def async_start(hass, server_config):
         broker = Broker(server_config, hass.loop)
         yield from broker.start()
     except BrokerException:
-        logging.getLogger(__name__).exception('Error initializing MQTT server')
+        logging.getLogger(__name__).exception("Error initializing MQTT server")
         return False, None
     finally:
         passwd.close()

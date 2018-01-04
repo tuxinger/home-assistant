@@ -14,7 +14,7 @@ from homeassistant.const import TEMP_CELSIUS
 from homeassistant.helpers.entity import Entity
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['tellcore-py==1.1.2']
+DEPENDENCIES = ['tellstick']
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the Tellstick sensors."""
+    """Set up the Tellstick sensors."""
     import tellcore.telldus as telldus
     import tellcore.constants as tellcore_constants
 

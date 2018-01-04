@@ -28,7 +28,7 @@ def setup_platform(hass, config: ConfigType,
                    add_devices: Callable[[list], None], discovery_info=None):
     """Set up the ISY994 lock platform."""
     if isy.ISY is None or not isy.ISY.connected:
-        _LOGGER.error('A connection has not been made to the ISY controller.')
+        _LOGGER.error("A connection has not been made to the ISY controller")
         return False
 
     devices = []
@@ -66,7 +66,10 @@ class ISYLockDevice(isy.ISYDevice, LockDevice):
     @property
     def state(self) -> str:
         """Get the state of the lock."""
-        return VALUE_TO_STATE.get(self.value, STATE_UNKNOWN)
+        if self.is_unknown():
+            return None
+        else:
+            return VALUE_TO_STATE.get(self.value, STATE_UNKNOWN)
 
     def lock(self, **kwargs) -> None:
         """Send the lock command to the ISY994 device."""
@@ -115,9 +118,9 @@ class ISYLockProgram(ISYLockDevice):
     def lock(self, **kwargs) -> None:
         """Lock the device."""
         if not self._actions.runThen():
-            _LOGGER.error('Unable to lock device')
+            _LOGGER.error("Unable to lock device")
 
     def unlock(self, **kwargs) -> None:
         """Unlock the device."""
         if not self._actions.runElse():
-            _LOGGER.error('Unable to unlock device')
+            _LOGGER.error("Unable to unlock device")

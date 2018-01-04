@@ -6,10 +6,11 @@ from unittest import mock
 
 import voluptuous as vol
 
-from homeassistant.bootstrap import setup_component
+from homeassistant.setup import setup_component
 from homeassistant.components import device_tracker
 from homeassistant.components.device_tracker import (
-    CONF_CONSIDER_HOME, CONF_TRACK_NEW)
+    CONF_CONSIDER_HOME, CONF_TRACK_NEW, CONF_NEW_DEVICE_DEFAULTS,
+    CONF_AWAY_HIDE)
 from homeassistant.components.device_tracker.asuswrt import (
     CONF_PROTOCOL, CONF_MODE, CONF_PUB_KEY, DOMAIN,
     CONF_PORT, PLATFORM_SCHEMA)
@@ -17,7 +18,8 @@ from homeassistant.const import (CONF_PLATFORM, CONF_PASSWORD, CONF_USERNAME,
                                  CONF_HOST)
 
 from tests.common import (
-    get_test_home_assistant, get_test_config_dir, assert_setup_component)
+    get_test_home_assistant, get_test_config_dir, assert_setup_component,
+    mock_component)
 
 FAKEFILE = None
 
@@ -43,7 +45,7 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
     def setup_method(self, _):
         """Setup things to be run when tests are started."""
         self.hass = get_test_home_assistant()
-        self.hass.config.components = set(['zone'])
+        mock_component(self.hass, 'zone')
 
     def teardown_method(self, _):
         """Stop everything that was started."""
@@ -56,7 +58,7 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
     def test_password_or_pub_key_required(self): \
             # pylint: disable=invalid-name
         """Test creating an AsusWRT scanner without a pass or pubkey."""
-        with assert_setup_component(0):
+        with assert_setup_component(0, DOMAIN):
             assert setup_component(
                 self.hass, DOMAIN, {DOMAIN: {
                     CONF_PLATFORM: 'asuswrt',
@@ -77,11 +79,15 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
                 CONF_USERNAME: 'fake_user',
                 CONF_PASSWORD: 'fake_pass',
                 CONF_TRACK_NEW: True,
-                CONF_CONSIDER_HOME: timedelta(seconds=180)
+                CONF_CONSIDER_HOME: timedelta(seconds=180),
+                CONF_NEW_DEVICE_DEFAULTS: {
+                    CONF_TRACK_NEW: True,
+                    CONF_AWAY_HIDE: False
+                }
             }
         }
 
-        with assert_setup_component(1):
+        with assert_setup_component(1, DOMAIN):
             assert setup_component(self.hass, DOMAIN, conf_dict)
 
         conf_dict[DOMAIN][CONF_MODE] = 'router'
@@ -103,11 +109,15 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
                 CONF_USERNAME: 'fake_user',
                 CONF_PUB_KEY: FAKEFILE,
                 CONF_TRACK_NEW: True,
-                CONF_CONSIDER_HOME: timedelta(seconds=180)
+                CONF_CONSIDER_HOME: timedelta(seconds=180),
+                CONF_NEW_DEVICE_DEFAULTS: {
+                    CONF_TRACK_NEW: True,
+                    CONF_AWAY_HIDE: False
+                }
             }
         }
 
-        with assert_setup_component(1):
+        with assert_setup_component(1, DOMAIN):
             assert setup_component(self.hass, DOMAIN, conf_dict)
 
         conf_dict[DOMAIN][CONF_MODE] = 'router'
@@ -134,11 +144,12 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
         update_mock.start()
         self.addCleanup(update_mock.stop)
         asuswrt = device_tracker.asuswrt.AsusWrtDeviceScanner(conf_dict)
-        asuswrt.ssh_connection()
+        asuswrt.connection.get_result()
         self.assertEqual(ssh.login.call_count, 1)
         self.assertEqual(
             ssh.login.call_args,
-            mock.call('fake_host', 'fake_user', port=22, ssh_key=FAKEFILE)
+            mock.call('fake_host', 'fake_user',
+                      ssh_key=FAKEFILE, port=22)
         )
 
     def test_ssh_login_with_password(self):
@@ -159,11 +170,12 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
         update_mock.start()
         self.addCleanup(update_mock.stop)
         asuswrt = device_tracker.asuswrt.AsusWrtDeviceScanner(conf_dict)
-        asuswrt.ssh_connection()
+        asuswrt.connection.get_result()
         self.assertEqual(ssh.login.call_count, 1)
         self.assertEqual(
             ssh.login.call_args,
-            mock.call('fake_host', 'fake_user', password='fake_pass', port=22)
+            mock.call('fake_host', 'fake_user',
+                      password='fake_pass', port=22)
         )
 
     def test_ssh_login_without_password_or_pubkey(self):  \
@@ -189,7 +201,79 @@ class TestComponentsDeviceTrackerASUSWRT(unittest.TestCase):
         update_mock.start()
         self.addCleanup(update_mock.stop)
 
-        with assert_setup_component(0):
+        with assert_setup_component(0, DOMAIN):
             assert setup_component(self.hass, DOMAIN,
                                    {DOMAIN: conf_dict})
         ssh.login.assert_not_called()
+
+    def test_telnet_login_with_password(self):
+        """Test that login is done with password when configured to."""
+        telnet = mock.MagicMock()
+        telnet_mock = mock.patch('telnetlib.Telnet', return_value=telnet)
+        telnet_mock.start()
+        self.addCleanup(telnet_mock.stop)
+        conf_dict = PLATFORM_SCHEMA({
+            CONF_PLATFORM: 'asuswrt',
+            CONF_PROTOCOL: 'telnet',
+            CONF_HOST: 'fake_host',
+            CONF_USERNAME: 'fake_user',
+            CONF_PASSWORD: 'fake_pass'
+        })
+        update_mock = mock.patch(
+            'homeassistant.components.device_tracker.asuswrt.'
+            'AsusWrtDeviceScanner.get_asuswrt_data')
+        update_mock.start()
+        self.addCleanup(update_mock.stop)
+        asuswrt = device_tracker.asuswrt.AsusWrtDeviceScanner(conf_dict)
+        asuswrt.connection.get_result()
+        self.assertEqual(telnet.read_until.call_count, 5)
+        self.assertEqual(telnet.write.call_count, 4)
+        self.assertEqual(
+            telnet.read_until.call_args_list[0],
+            mock.call(b'login: ')
+        )
+        self.assertEqual(
+            telnet.write.call_args_list[0],
+            mock.call(b'fake_user\n')
+        )
+        self.assertEqual(
+            telnet.read_until.call_args_list[1],
+            mock.call(b'Password: ')
+        )
+        self.assertEqual(
+            telnet.write.call_args_list[1],
+            mock.call(b'fake_pass\n')
+        )
+        self.assertEqual(
+            telnet.read_until.call_args_list[2],
+            mock.call(b'#')
+        )
+
+    def test_telnet_login_without_password(self):  \
+            # pylint: disable=invalid-name
+        """Test that login is not called without password or pub_key."""
+        telnet = mock.MagicMock()
+        telnet_mock = mock.patch('telnetlib.Telnet', return_value=telnet)
+        telnet_mock.start()
+        self.addCleanup(telnet_mock.stop)
+
+        conf_dict = {
+            CONF_PLATFORM: 'asuswrt',
+            CONF_PROTOCOL: 'telnet',
+            CONF_HOST: 'fake_host',
+            CONF_USERNAME: 'fake_user',
+        }
+
+        with self.assertRaises(vol.Invalid):
+            conf_dict = PLATFORM_SCHEMA(conf_dict)
+
+        update_mock = mock.patch(
+            'homeassistant.components.device_tracker.asuswrt.'
+            'AsusWrtDeviceScanner.get_asuswrt_data')
+        update_mock.start()
+        self.addCleanup(update_mock.stop)
+
+        with assert_setup_component(0, DOMAIN):
+            assert setup_component(self.hass, DOMAIN,
+                                   {DOMAIN: conf_dict})
+        telnet.login.assert_not_called()

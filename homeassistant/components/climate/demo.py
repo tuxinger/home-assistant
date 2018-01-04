@@ -5,19 +5,29 @@ For more details about this platform, please refer to the documentation
 https://home-assistant.io/components/demo/
 """
 from homeassistant.components.climate import (
-    ClimateDevice, ATTR_TARGET_TEMP_HIGH, ATTR_TARGET_TEMP_LOW)
+    ClimateDevice, ATTR_TARGET_TEMP_HIGH, ATTR_TARGET_TEMP_LOW,
+    SUPPORT_TARGET_TEMPERATURE, SUPPORT_TARGET_HUMIDITY,
+    SUPPORT_AWAY_MODE, SUPPORT_HOLD_MODE, SUPPORT_FAN_MODE,
+    SUPPORT_OPERATION_MODE, SUPPORT_AUX_HEAT, SUPPORT_SWING_MODE,
+    SUPPORT_TARGET_TEMPERATURE_HIGH, SUPPORT_TARGET_TEMPERATURE_LOW)
 from homeassistant.const import TEMP_CELSIUS, TEMP_FAHRENHEIT, ATTR_TEMPERATURE
+
+SUPPORT_FLAGS = (SUPPORT_TARGET_TEMPERATURE | SUPPORT_TARGET_HUMIDITY |
+                 SUPPORT_AWAY_MODE | SUPPORT_HOLD_MODE | SUPPORT_FAN_MODE |
+                 SUPPORT_OPERATION_MODE | SUPPORT_AUX_HEAT |
+                 SUPPORT_SWING_MODE | SUPPORT_TARGET_TEMPERATURE_HIGH |
+                 SUPPORT_TARGET_TEMPERATURE_LOW)
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the Demo climate devices."""
+    """Set up the Demo climate devices."""
     add_devices([
-        DemoClimate("HeatPump", 68, TEMP_FAHRENHEIT, None, None, 77,
-                    "Auto Low", None, None, "Auto", "heat", None, None, None),
-        DemoClimate("Hvac", 21, TEMP_CELSIUS, True, None, 22, "On High",
-                    67, 54, "Off", "cool", False, None, None),
-        DemoClimate("Ecobee", None, TEMP_CELSIUS, None, None, 23, "Auto Low",
-                    None, None, "Auto", "auto", None, 24, 21)
+        DemoClimate('HeatPump', 68, TEMP_FAHRENHEIT, None, None, 77,
+                    'Auto Low', None, None, 'Auto', 'heat', None, None, None),
+        DemoClimate('Hvac', 21, TEMP_CELSIUS, True, None, 22, 'On High',
+                    67, 54, 'Off', 'cool', False, None, None),
+        DemoClimate('Ecobee', None, TEMP_CELSIUS, None, None, 23, 'Auto Low',
+                    None, None, 'Auto', 'auto', None, 24, 21)
     ])
 
 
@@ -41,15 +51,20 @@ class DemoClimate(ClimateDevice):
         self._current_operation = current_operation
         self._aux = aux
         self._current_swing_mode = current_swing_mode
-        self._fan_list = ["On Low", "On High", "Auto Low", "Auto High", "Off"]
-        self._operation_list = ["heat", "cool", "auto", "off"]
-        self._swing_list = ["Auto", "1", "2", "3", "Off"]
+        self._fan_list = ['On Low', 'On High', 'Auto Low', 'Auto High', 'Off']
+        self._operation_list = ['heat', 'cool', 'auto', 'off']
+        self._swing_list = ['Auto', '1', '2', '3', 'Off']
         self._target_temperature_high = target_temp_high
         self._target_temperature_low = target_temp_low
 
     @property
+    def supported_features(self):
+        """Return the list of supported features."""
+        return SUPPORT_FLAGS
+
+    @property
     def should_poll(self):
-        """Polling not needed for a demo climate device."""
+        """Return the polling state."""
         return False
 
     @property
@@ -99,7 +114,7 @@ class DemoClimate(ClimateDevice):
 
     @property
     def operation_list(self):
-        """List of available operation modes."""
+        """Return the list of available operation modes."""
         return self._operation_list
 
     @property
@@ -114,7 +129,7 @@ class DemoClimate(ClimateDevice):
 
     @property
     def is_aux_heat_on(self):
-        """Return true if away mode is on."""
+        """Return true if aux heat is on."""
         return self._aux
 
     @property
@@ -124,7 +139,7 @@ class DemoClimate(ClimateDevice):
 
     @property
     def fan_list(self):
-        """List of available fan modes."""
+        """Return the list of available fan modes."""
         return self._fan_list
 
     def set_temperature(self, **kwargs):
@@ -183,11 +198,11 @@ class DemoClimate(ClimateDevice):
         self.schedule_update_ha_state()
 
     def turn_aux_heat_on(self):
-        """Turn away auxillary heater on."""
+        """Turn auxillary heater on."""
         self._aux = True
         self.schedule_update_ha_state()
 
     def turn_aux_heat_off(self):
-        """Turn auxillary heater off."""
+        """Turn auxiliary heater off."""
         self._aux = False
         self.schedule_update_ha_state()

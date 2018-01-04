@@ -12,7 +12,9 @@ from homeassistant.components.nest import DATA_NEST
 from homeassistant.components.climate import (
     STATE_AUTO, STATE_COOL, STATE_HEAT, ClimateDevice,
     PLATFORM_SCHEMA, ATTR_TARGET_TEMP_HIGH, ATTR_TARGET_TEMP_LOW,
-    ATTR_TEMPERATURE)
+    ATTR_TEMPERATURE, SUPPORT_TARGET_TEMPERATURE,
+    SUPPORT_TARGET_TEMPERATURE_HIGH, SUPPORT_TARGET_TEMPERATURE_LOW,
+    SUPPORT_OPERATION_MODE, SUPPORT_AWAY_MODE, SUPPORT_FAN_MODE)
 from homeassistant.const import (
     TEMP_CELSIUS, TEMP_FAHRENHEIT,
     CONF_SCAN_INTERVAL, STATE_ON, STATE_OFF, STATE_UNKNOWN)
@@ -28,13 +30,15 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 STATE_ECO = 'eco'
 STATE_HEAT_COOL = 'heat-cool'
 
+SUPPORT_FLAGS = (SUPPORT_TARGET_TEMPERATURE | SUPPORT_TARGET_TEMPERATURE_HIGH |
+                 SUPPORT_TARGET_TEMPERATURE_LOW | SUPPORT_OPERATION_MODE |
+                 SUPPORT_AWAY_MODE | SUPPORT_FAN_MODE)
+
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the Nest thermostat."""
+    """Set up the Nest thermostat."""
     if discovery_info is None:
         return
-
-    _LOGGER.debug("Setting up nest thermostat")
 
     temp_unit = hass.config.units.temperature_unit
 
@@ -90,6 +94,11 @@ class NestThermostat(ClimateDevice):
         self._max_temperature = None
 
     @property
+    def supported_features(self):
+        """Return the list of supported features."""
+        return SUPPORT_FLAGS
+
+    @property
     def name(self):
         """Return the name of the nest, if any."""
         return self._name
@@ -111,16 +120,14 @@ class NestThermostat(ClimateDevice):
             return self._mode
         elif self._mode == STATE_HEAT_COOL:
             return STATE_AUTO
-        else:
-            return STATE_UNKNOWN
+        return STATE_UNKNOWN
 
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
         if self._mode != STATE_HEAT_COOL and not self.is_away_mode_on:
             return self._target_temperature
-        else:
-            return None
+        return None
 
     @property
     def target_temperature_low(self):
@@ -131,8 +138,7 @@ class NestThermostat(ClimateDevice):
             return self._eco_temperature[0]
         if self._mode == STATE_HEAT_COOL:
             return self._target_temperature[0]
-        else:
-            return None
+        return None
 
     @property
     def target_temperature_high(self):
@@ -143,8 +149,7 @@ class NestThermostat(ClimateDevice):
             return self._eco_temperature[1]
         if self._mode == STATE_HEAT_COOL:
             return self._target_temperature[1]
-        else:
-            return None
+        return None
 
     @property
     def is_away_mode_on(self):
@@ -190,9 +195,8 @@ class NestThermostat(ClimateDevice):
         if self._has_fan:
             # Return whether the fan is on
             return STATE_ON if self._fan else STATE_AUTO
-        else:
-            # No Fan available so disable slider
-            return None
+        # No Fan available so disable slider
+        return None
 
     @property
     def fan_list(self):

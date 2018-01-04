@@ -32,7 +32,7 @@ def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
             InsteonPLMSwitchDevice(hass, plm, address, name)
         )
 
-    hass.async_add_job(async_add_devices(device_list))
+    async_add_devices(device_list)
 
 
 class InsteonPLMSwitchDevice(SwitchDevice):
@@ -55,12 +55,12 @@ class InsteonPLMSwitchDevice(SwitchDevice):
 
     @property
     def address(self):
-        """Return the the address of the node."""
+        """Return the address of the node."""
         return self._address
 
     @property
     def name(self):
-        """Return the the name of the node."""
+        """Return the name of the node."""
         return self._name
 
     @property

@@ -4,35 +4,39 @@ Support the ISY-994 controllers.
 For configuration details please visit the documentation for this component at
 https://home-assistant.io/components/isy994/
 """
+import asyncio
 from collections import namedtuple
 import logging
 from urllib.parse import urlparse
+
 import voluptuous as vol
 
 from homeassistant.core import HomeAssistant  # noqa
 from homeassistant.const import (
-    CONF_HOST, CONF_PASSWORD, CONF_USERNAME,
-    EVENT_HOMEASSISTANT_STOP)
+    CONF_HOST, CONF_PASSWORD, CONF_USERNAME, EVENT_HOMEASSISTANT_STOP)
 from homeassistant.helpers import discovery, config_validation as cv
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.typing import ConfigType, Dict  # noqa
 
-
-DOMAIN = "isy994"
-REQUIREMENTS = ['PyISY==1.0.7']
-
-ISY = None
-DEFAULT_SENSOR_STRING = 'sensor'
-DEFAULT_HIDDEN_STRING = '{HIDE ME}'
-CONF_TLS_VER = 'tls'
-CONF_HIDDEN_STRING = 'hidden_string'
-CONF_SENSOR_STRING = 'sensor_string'
-KEY_MY_PROGRAMS = 'My Programs'
-KEY_FOLDER = 'folder'
-KEY_ACTIONS = 'actions'
-KEY_STATUS = 'status'
+REQUIREMENTS = ['PyISY==1.1.0']
 
 _LOGGER = logging.getLogger(__name__)
+
+DOMAIN = 'isy994'
+
+CONF_HIDDEN_STRING = 'hidden_string'
+CONF_SENSOR_STRING = 'sensor_string'
+CONF_TLS_VER = 'tls'
+
+DEFAULT_HIDDEN_STRING = '{HIDE ME}'
+DEFAULT_SENSOR_STRING = 'sensor'
+
+ISY = None
+
+KEY_ACTIONS = 'actions'
+KEY_FOLDER = 'folder'
+KEY_MY_PROGRAMS = 'My Programs'
+KEY_STATUS = 'status'
 
 CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
@@ -88,6 +92,34 @@ def filter_nodes(nodes: list, units: list=None, states: list=None) -> list:
     return filtered_nodes
 
 
+def _is_node_a_sensor(node, path: str, sensor_identifier: str) -> bool:
+    """Determine if the given node is a sensor."""
+    if not isinstance(node, PYISY.Nodes.Node):
+        return False
+
+    if sensor_identifier in path or sensor_identifier in node.name:
+        return True
+
+    # This method is most reliable but only works on 5.x firmware
+    try:
+        if node.node_def_id == 'BinaryAlarm':
+            return True
+    except AttributeError:
+        pass
+
+    # This method works on all firmwares, but only for Insteon devices
+    try:
+        device_type = node.type
+    except AttributeError:
+        # Node has no type; most likely not an Insteon device
+        pass
+    else:
+        split_type = device_type.split('.')
+        return split_type[0] == '16'  # 16 represents Insteon binary sensors
+
+    return False
+
+
 def _categorize_nodes(hidden_identifier: str, sensor_identifier: str) -> None:
     """Categorize the ISY994 nodes."""
     global SENSOR_NODES
@@ -103,7 +135,7 @@ def _categorize_nodes(hidden_identifier: str, sensor_identifier: str) -> None:
         hidden = hidden_identifier in path or hidden_identifier in node.name
         if hidden:
             node.name += hidden_identifier
-        if sensor_identifier in path or sensor_identifier in node.name:
+        if _is_node_a_sensor(node, path, sensor_identifier):
             SENSOR_NODES.append(node)
         elif isinstance(node, PYISY.Nodes.Node):
             NODES.append(node)
@@ -158,10 +190,10 @@ def setup(hass: HomeAssistant, config: ConfigType) -> bool:
     host = urlparse(isy_config.get(CONF_HOST))
     port = host.port
     addr = host.geturl()
-    hidden_identifier = isy_config.get(CONF_HIDDEN_STRING,
-                                       DEFAULT_HIDDEN_STRING)
-    sensor_identifier = isy_config.get(CONF_SENSOR_STRING,
-                                       DEFAULT_SENSOR_STRING)
+    hidden_identifier = isy_config.get(
+        CONF_HIDDEN_STRING, DEFAULT_HIDDEN_STRING)
+    sensor_identifier = isy_config.get(
+        CONF_SENSOR_STRING, DEFAULT_SENSOR_STRING)
 
     global HIDDEN_STRING
     HIDDEN_STRING = hidden_identifier
@@ -173,7 +205,7 @@ def setup(hass: HomeAssistant, config: ConfigType) -> bool:
         addr = addr.replace('https://', '')
         https = True
     else:
-        _LOGGER.error('isy994 host value in configuration is invalid.')
+        _LOGGER.error("isy994 host value in configuration is invalid")
         return False
 
     addr = addr.replace(':{}'.format(port), '')
@@ -224,14 +256,30 @@ class ISYDevice(Entity):
     def __init__(self, node) -> None:
         """Initialize the insteon device."""
         self._node = node
+        self._change_handler = None
+        self._control_handler = None
 
-        self._change_handler = self._node.status.subscribe('changed',
-                                                           self.on_update)
+    @asyncio.coroutine
+    def async_added_to_hass(self) -> None:
+        """Subscribe to the node change events."""
+        self._change_handler = self._node.status.subscribe(
+            'changed', self.on_update)
+
+        if hasattr(self._node, 'controlEvents'):
+            self._control_handler = self._node.controlEvents.subscribe(
+                self.on_control)
 
     # pylint: disable=unused-argument
     def on_update(self, event: object) -> None:
         """Handle the update event from the ISY994 Node."""
-        self.update_ha_state()
+        self.schedule_update_ha_state()
+
+    def on_control(self, event: object) -> None:
+        """Handle a control event from the ISY994 Node."""
+        self.hass.bus.fire('isy994_control', {
+            'entity_id': self.entity_id,
+            'control': event
+        })
 
     @property
     def domain(self) -> str:
@@ -266,6 +314,21 @@ class ISYDevice(Entity):
         """Get the current value of the device."""
         # pylint: disable=protected-access
         return self._node.status._val
+
+    def is_unknown(self) -> bool:
+        """Get whether or not the value of this Entity's node is unknown.
+
+        PyISY reports unknown values as -inf
+        """
+        return self.value == -1 * float('inf')
+
+    @property
+    def state(self):
+        """Return the state of the ISY device."""
+        if self.is_unknown():
+            return None
+        else:
+            return super().state
 
     @property
     def device_state_attributes(self) -> Dict:

@@ -1,20 +1,21 @@
 """
-Support for Hue lights.
+This component provides light support for the Philips Hue system.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/light.hue/
 """
-import json
-import logging
-import os
-import random
-import socket
 from datetime import timedelta
-from urllib.parse import urlparse
+import logging
+import random
+import re
+import socket
 
 import voluptuous as vol
 
+import homeassistant.components.hue as hue
+
 import homeassistant.util as util
+from homeassistant.util import yaml
 import homeassistant.util.color as color_util
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS, ATTR_COLOR_TEMP, ATTR_EFFECT, ATTR_FLASH, ATTR_RGB_COLOR,
@@ -22,39 +23,44 @@ from homeassistant.components.light import (
     FLASH_LONG, FLASH_SHORT, SUPPORT_BRIGHTNESS, SUPPORT_COLOR_TEMP,
     SUPPORT_EFFECT, SUPPORT_FLASH, SUPPORT_RGB_COLOR, SUPPORT_TRANSITION,
     SUPPORT_XY_COLOR, Light, PLATFORM_SCHEMA)
-from homeassistant.config import load_yaml_config_file
-from homeassistant.const import (CONF_FILENAME, CONF_HOST, DEVICE_DEFAULT_NAME)
-from homeassistant.loader import get_component
-from homeassistant.components.emulated_hue import ATTR_EMULATED_HUE
+from homeassistant.const import CONF_FILENAME, CONF_HOST, DEVICE_DEFAULT_NAME
+from homeassistant.components.emulated_hue import ATTR_EMULATED_HUE_HIDDEN
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['phue==0.9']
+DEPENDENCIES = ['hue']
 
-# Track previously setup bridges
-_CONFIGURED_BRIDGES = {}
-# Map ip to request id for configuring
-_CONFIGURING = {}
 _LOGGER = logging.getLogger(__name__)
 
-CONF_ALLOW_UNREACHABLE = 'allow_unreachable'
-
-DEFAULT_ALLOW_UNREACHABLE = False
-DOMAIN = "light"
-SERVICE_HUE_SCENE = "hue_activate_scene"
+DATA_KEY = 'hue_lights'
+DATA_LIGHTS = 'lights'
+DATA_LIGHTGROUPS = 'lightgroups'
 
 MIN_TIME_BETWEEN_SCANS = timedelta(seconds=10)
 MIN_TIME_BETWEEN_FORCED_SCANS = timedelta(milliseconds=100)
 
-PHUE_CONFIG_FILE = 'phue.conf'
+SUPPORT_HUE_ON_OFF = (SUPPORT_FLASH | SUPPORT_TRANSITION)
+SUPPORT_HUE_DIMMABLE = (SUPPORT_HUE_ON_OFF | SUPPORT_BRIGHTNESS)
+SUPPORT_HUE_COLOR_TEMP = (SUPPORT_HUE_DIMMABLE | SUPPORT_COLOR_TEMP)
+SUPPORT_HUE_COLOR = (SUPPORT_HUE_DIMMABLE | SUPPORT_EFFECT |
+                     SUPPORT_RGB_COLOR | SUPPORT_XY_COLOR)
+SUPPORT_HUE_EXTENDED = (SUPPORT_HUE_COLOR_TEMP | SUPPORT_HUE_COLOR)
 
-SUPPORT_HUE = (SUPPORT_BRIGHTNESS | SUPPORT_COLOR_TEMP | SUPPORT_EFFECT |
-               SUPPORT_FLASH | SUPPORT_RGB_COLOR | SUPPORT_TRANSITION |
-               SUPPORT_XY_COLOR)
+SUPPORT_HUE = {
+    'Extended color light': SUPPORT_HUE_EXTENDED,
+    'Color light': SUPPORT_HUE_COLOR,
+    'Dimmable light': SUPPORT_HUE_DIMMABLE,
+    'On/Off plug-in unit': SUPPORT_HUE_ON_OFF,
+    'Color temperature light': SUPPORT_HUE_COLOR_TEMP
+    }
 
-CONF_ALLOW_IN_EMULATED_HUE = "allow_in_emulated_hue"
+ATTR_IS_HUE_GROUP = 'is_hue_group'
+
+# Legacy configuration, will be removed in 0.60
+CONF_ALLOW_UNREACHABLE = 'allow_unreachable'
+DEFAULT_ALLOW_UNREACHABLE = False
+CONF_ALLOW_IN_EMULATED_HUE = 'allow_in_emulated_hue'
 DEFAULT_ALLOW_IN_EMULATED_HUE = True
-
-CONF_ALLOW_HUE_GROUPS = "allow_hue_groups"
+CONF_ALLOW_HUE_GROUPS = 'allow_hue_groups'
 DEFAULT_ALLOW_HUE_GROUPS = True
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -66,228 +72,168 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
                  default=DEFAULT_ALLOW_HUE_GROUPS): cv.boolean,
 })
 
-ATTR_GROUP_NAME = "group_name"
-ATTR_SCENE_NAME = "scene_name"
-SCENE_SCHEMA = vol.Schema({
-    vol.Required(ATTR_GROUP_NAME): cv.string,
-    vol.Required(ATTR_SCENE_NAME): cv.string,
-})
+MIGRATION_ID = 'light_hue_config_migration'
+MIGRATION_TITLE = 'Philips Hue Configuration Migration'
+MIGRATION_INSTRUCTIONS = """
+Configuration for the Philips Hue component has changed; action required.
 
-ATTR_IS_HUE_GROUP = "is_hue_group"
+You have configured at least one bridge:
 
+    hue:
+{config}
 
-def _find_host_from_config(hass, filename=PHUE_CONFIG_FILE):
-    """Attempt to detect host based on existing configuration."""
-    path = hass.config.path(filename)
-
-    if not os.path.isfile(path):
-        return None
-
-    try:
-        with open(path) as inp:
-            return next(json.loads(''.join(inp)).keys().__iter__())
-    except (ValueError, AttributeError, StopIteration):
-        # ValueError if can't parse as JSON
-        # AttributeError if JSON value is not a dict
-        # StopIteration if no keys
-        return None
+This configuration is deprecated, please check the
+[Hue component](https://home-assistant.io/components/hue/) page for more
+information.
+"""
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the Hue lights."""
-    # Default needed in case of discovery
-    filename = config.get(CONF_FILENAME, PHUE_CONFIG_FILE)
-    allow_unreachable = config.get(CONF_ALLOW_UNREACHABLE,
-                                   DEFAULT_ALLOW_UNREACHABLE)
-    allow_in_emulated_hue = config.get(CONF_ALLOW_IN_EMULATED_HUE,
-                                       DEFAULT_ALLOW_IN_EMULATED_HUE)
-    allow_hue_groups = config.get(CONF_ALLOW_HUE_GROUPS)
-
-    if discovery_info is not None:
-        host = urlparse(discovery_info[1]).hostname
-
-        if "HASS Bridge" in discovery_info[0]:
-            _LOGGER.info('Emulated hue found, will not add')
-            return False
-    else:
-        host = config.get(CONF_HOST, None)
-
-        if host is None:
-            host = _find_host_from_config(hass, filename)
-
-        if host is None:
-            _LOGGER.error('No host found in configuration')
-            return False
-
-    # Only act if we are not already configuring this host
-    if host in _CONFIGURING or \
-            socket.gethostbyname(host) in _CONFIGURED_BRIDGES:
+    """Set up the Hue lights."""
+    if discovery_info is None or 'bridge_id' not in discovery_info:
         return
 
-    setup_bridge(host, hass, add_devices, filename, allow_unreachable,
-                 allow_in_emulated_hue, allow_hue_groups)
+    setup_data(hass)
+
+    if config is not None and len(config) > 0:
+        # Legacy configuration, will be removed in 0.60
+        config_str = yaml.dump([config])
+        # Indent so it renders in a fixed-width font
+        config_str = re.sub('(?m)^', '      ', config_str)
+        hass.components.persistent_notification.async_create(
+            MIGRATION_INSTRUCTIONS.format(config=config_str),
+            title=MIGRATION_TITLE,
+            notification_id=MIGRATION_ID)
+
+    bridge_id = discovery_info['bridge_id']
+    bridge = hass.data[hue.DOMAIN][bridge_id]
+    unthrottled_update_lights(hass, bridge, add_devices)
 
 
-def setup_bridge(host, hass, add_devices, filename, allow_unreachable,
-                 allow_in_emulated_hue, allow_hue_groups):
-    """Setup a phue bridge based on host parameter."""
+def setup_data(hass):
+    """Initialize internal data. Useful from tests."""
+    if DATA_KEY not in hass.data:
+        hass.data[DATA_KEY] = {DATA_LIGHTS: {}, DATA_LIGHTGROUPS: {}}
+
+
+@util.Throttle(MIN_TIME_BETWEEN_SCANS, MIN_TIME_BETWEEN_FORCED_SCANS)
+def update_lights(hass, bridge, add_devices):
+    """Update the Hue light objects with latest info from the bridge."""
+    return unthrottled_update_lights(hass, bridge, add_devices)
+
+
+def unthrottled_update_lights(hass, bridge, add_devices):
+    """Internal version of update_lights."""
     import phue
 
+    if not bridge.configured:
+        return
+
     try:
-        bridge = phue.Bridge(
-            host,
-            config_file_path=hass.config.path(filename))
-    except ConnectionRefusedError:  # Wrong host was given
-        _LOGGER.error("Error connecting to the Hue bridge at %s", host)
-
+        api = bridge.get_api()
+    except phue.PhueRequestTimeout:
+        _LOGGER.warning('Timeout trying to reach the bridge')
+        return
+    except ConnectionRefusedError:
+        _LOGGER.error('The bridge refused the connection')
+        return
+    except socket.error:
+        # socket.error when we cannot reach Hue
+        _LOGGER.exception('Cannot reach the bridge')
         return
 
-    except phue.PhueRegistrationException:
-        _LOGGER.warning("Connected to Hue at %s but not registered.", host)
+    bridge_type = get_bridge_type(api)
 
-        request_configuration(host, hass, add_devices, filename,
-                              allow_unreachable, allow_in_emulated_hue,
-                              allow_hue_groups)
+    new_lights = process_lights(
+        hass, api, bridge, bridge_type,
+        lambda **kw: update_lights(hass, bridge, add_devices, **kw))
+    if bridge.allow_hue_groups:
+        new_lightgroups = process_groups(
+            hass, api, bridge, bridge_type,
+            lambda **kw: update_lights(hass, bridge, add_devices, **kw))
+        new_lights.extend(new_lightgroups)
 
-        return
+    if new_lights:
+        add_devices(new_lights)
 
-    # If we came here and configuring this host, mark as done
-    if host in _CONFIGURING:
-        request_id = _CONFIGURING.pop(host)
 
-        configurator = get_component('configurator')
+def get_bridge_type(api):
+    """Return the bridge type."""
+    api_name = api.get('config').get('name')
+    if api_name in ('RaspBee-GW', 'deCONZ-GW'):
+        return 'deconz'
+    else:
+        return 'hue'
 
-        configurator.request_done(request_id)
 
-    lights = {}
-    lightgroups = {}
-    skip_groups = not allow_hue_groups
+def process_lights(hass, api, bridge, bridge_type, update_lights_cb):
+    """Set up HueLight objects for all lights."""
+    api_lights = api.get('lights')
 
-    @util.Throttle(MIN_TIME_BETWEEN_SCANS, MIN_TIME_BETWEEN_FORCED_SCANS)
-    def update_lights():
-        """Update the Hue light objects with latest info from the bridge."""
-        nonlocal skip_groups
+    if not isinstance(api_lights, dict):
+        _LOGGER.error('Got unexpected result from Hue API')
+        return []
 
-        try:
-            api = bridge.get_api()
-        except socket.error:
-            # socket.error when we cannot reach Hue
-            _LOGGER.exception("Cannot reach the bridge")
-            return
+    new_lights = []
 
-        api_lights = api.get('lights')
-
-        if not isinstance(api_lights, dict):
-            _LOGGER.error("Got unexpected result from Hue API")
-            return
-
-        if skip_groups:
-            api_groups = {}
+    lights = hass.data[DATA_KEY][DATA_LIGHTS]
+    for light_id, info in api_lights.items():
+        if light_id not in lights:
+            lights[light_id] = HueLight(
+                int(light_id), info, bridge,
+                update_lights_cb,
+                bridge_type, bridge.allow_unreachable,
+                bridge.allow_in_emulated_hue)
+            new_lights.append(lights[light_id])
         else:
-            api_groups = api.get('groups')
+            lights[light_id].info = info
+            lights[light_id].schedule_update_ha_state()
 
-        if not isinstance(api_groups, dict):
-            _LOGGER.error("Got unexpected result from Hue API")
-            return
+    return new_lights
 
-        new_lights = []
 
-        api_name = api.get('config').get('name')
-        if api_name in ('RaspBee-GW', 'deCONZ-GW'):
-            bridge_type = 'deconz'
+def process_groups(hass, api, bridge, bridge_type, update_lights_cb):
+    """Set up HueLight objects for all groups."""
+    api_groups = api.get('groups')
+
+    if not isinstance(api_groups, dict):
+        _LOGGER.error('Got unexpected result from Hue API')
+        return []
+
+    new_lights = []
+
+    groups = hass.data[DATA_KEY][DATA_LIGHTGROUPS]
+    for lightgroup_id, info in api_groups.items():
+        if 'state' not in info:
+            _LOGGER.warning('Group info does not contain state. '
+                            'Please update your hub.')
+            return []
+
+        if lightgroup_id not in groups:
+            groups[lightgroup_id] = HueLight(
+                int(lightgroup_id), info, bridge,
+                update_lights_cb,
+                bridge_type, bridge.allow_unreachable,
+                bridge.allow_in_emulated_hue, True)
+            new_lights.append(groups[lightgroup_id])
         else:
-            bridge_type = 'hue'
+            groups[lightgroup_id].info = info
+            groups[lightgroup_id].schedule_update_ha_state()
 
-        for light_id, info in api_lights.items():
-            if light_id not in lights:
-                lights[light_id] = HueLight(int(light_id), info,
-                                            bridge, update_lights,
-                                            bridge_type, allow_unreachable,
-                                            allow_in_emulated_hue)
-                new_lights.append(lights[light_id])
-            else:
-                lights[light_id].info = info
-                lights[light_id].schedule_update_ha_state()
-
-        for lightgroup_id, info in api_groups.items():
-            if 'state' not in info:
-                _LOGGER.warning('Group info does not contain state. '
-                                'Please update your hub.')
-                skip_groups = True
-                break
-
-            if lightgroup_id not in lightgroups:
-                lightgroups[lightgroup_id] = HueLight(
-                    int(lightgroup_id), info, bridge, update_lights,
-                    bridge_type, allow_unreachable, allow_in_emulated_hue,
-                    True)
-                new_lights.append(lightgroups[lightgroup_id])
-            else:
-                lightgroups[lightgroup_id].info = info
-                lightgroups[lightgroup_id].schedule_update_ha_state()
-
-        if new_lights:
-            add_devices(new_lights)
-
-    _CONFIGURED_BRIDGES[socket.gethostbyname(host)] = True
-
-    # create a service for calling run_scene directly on the bridge,
-    # used to simplify automation rules.
-    def hue_activate_scene(call):
-        """Service to call directly directly into bridge to set scenes."""
-        group_name = call.data[ATTR_GROUP_NAME]
-        scene_name = call.data[ATTR_SCENE_NAME]
-        bridge.run_scene(group_name, scene_name)
-
-    descriptions = load_yaml_config_file(
-        os.path.join(os.path.dirname(__file__), 'services.yaml'))
-    hass.services.register(DOMAIN, SERVICE_HUE_SCENE, hue_activate_scene,
-                           descriptions.get(SERVICE_HUE_SCENE),
-                           schema=SCENE_SCHEMA)
-
-    update_lights()
-
-
-def request_configuration(host, hass, add_devices, filename,
-                          allow_unreachable, allow_in_emulated_hue,
-                          allow_hue_groups):
-    """Request configuration steps from the user."""
-    configurator = get_component('configurator')
-
-    # We got an error if this method is called while we are configuring
-    if host in _CONFIGURING:
-        configurator.notify_errors(
-            _CONFIGURING[host], "Failed to register, please try again.")
-
-        return
-
-    # pylint: disable=unused-argument
-    def hue_configuration_callback(data):
-        """The actions to do when our configuration callback is called."""
-        setup_bridge(host, hass, add_devices, filename, allow_unreachable,
-                     allow_in_emulated_hue, allow_hue_groups)
-
-    _CONFIGURING[host] = configurator.request_config(
-        hass, "Philips Hue", hue_configuration_callback,
-        description=("Press the button on the bridge to register Philips Hue "
-                     "with Home Assistant."),
-        entity_picture="/static/images/logo_philips_hue.png",
-        description_image="/static/images/config_philips_hue.jpg",
-        submit_caption="I have pressed the button"
-    )
+    return new_lights
 
 
 class HueLight(Light):
     """Representation of a Hue light."""
 
-    def __init__(self, light_id, info, bridge, update_lights,
+    def __init__(self, light_id, info, bridge, update_lights_cb,
                  bridge_type, allow_unreachable, allow_in_emulated_hue,
                  is_group=False):
         """Initialize the light."""
         self.light_id = light_id
         self.info = info
         self.bridge = bridge
-        self.update_lights = update_lights
+        self.update_lights = update_lights_cb
         self.bridge_type = bridge_type
         self.allow_unreachable = allow_unreachable
         self.is_group = is_group
@@ -320,41 +266,36 @@ class HueLight(Light):
         """Return the brightness of this light between 0..255."""
         if self.is_group:
             return self.info['action'].get('bri')
-        else:
-            return self.info['state'].get('bri')
+        return self.info['state'].get('bri')
 
     @property
     def xy_color(self):
         """Return the XY color value."""
         if self.is_group:
             return self.info['action'].get('xy')
-        else:
-            return self.info['state'].get('xy')
+        return self.info['state'].get('xy')
 
     @property
     def color_temp(self):
         """Return the CT color value."""
         if self.is_group:
             return self.info['action'].get('ct')
-        else:
-            return self.info['state'].get('ct')
+        return self.info['state'].get('ct')
 
     @property
     def is_on(self):
         """Return true if device is on."""
         if self.is_group:
             return self.info['state']['any_on']
-        else:
-            if self.allow_unreachable:
-                return self.info['state']['on']
-            else:
-                return self.info['state']['reachable'] and \
-                    self.info['state']['on']
+        elif self.allow_unreachable:
+            return self.info['state']['on']
+        return self.info['state']['reachable'] and \
+            self.info['state']['on']
 
     @property
     def supported_features(self):
         """Flag supported features."""
-        return SUPPORT_HUE
+        return SUPPORT_HUE.get(self.info.get('type'), SUPPORT_HUE_EXTENDED)
 
     @property
     def effect_list(self):
@@ -366,21 +307,34 @@ class HueLight(Light):
         command = {'on': True}
 
         if ATTR_TRANSITION in kwargs:
-            command['transitiontime'] = kwargs[ATTR_TRANSITION] * 10
+            command['transitiontime'] = int(kwargs[ATTR_TRANSITION] * 10)
 
         if ATTR_XY_COLOR in kwargs:
-            command['xy'] = kwargs[ATTR_XY_COLOR]
+            if self.info.get('manufacturername') == 'OSRAM':
+                color_hue, sat = color_util.color_xy_to_hs(
+                    *kwargs[ATTR_XY_COLOR])
+                command['hue'] = color_hue
+                command['sat'] = sat
+            else:
+                command['xy'] = kwargs[ATTR_XY_COLOR]
         elif ATTR_RGB_COLOR in kwargs:
-            xyb = color_util.color_RGB_to_xy(
-                *(int(val) for val in kwargs[ATTR_RGB_COLOR]))
-            command['xy'] = xyb[0], xyb[1]
-            command['bri'] = xyb[2]
+            if self.info.get('manufacturername') == 'OSRAM':
+                hsv = color_util.color_RGB_to_hsv(
+                    *(int(val) for val in kwargs[ATTR_RGB_COLOR]))
+                command['hue'] = hsv[0]
+                command['sat'] = hsv[1]
+                command['bri'] = hsv[2]
+            else:
+                xyb = color_util.color_RGB_to_xy(
+                    *(int(val) for val in kwargs[ATTR_RGB_COLOR]))
+                command['xy'] = xyb[0], xyb[1]
+                command['bri'] = xyb[2]
+        elif ATTR_COLOR_TEMP in kwargs:
+            temp = kwargs[ATTR_COLOR_TEMP]
+            command['ct'] = max(self.min_mireds, min(temp, self.max_mireds))
 
         if ATTR_BRIGHTNESS in kwargs:
             command['bri'] = kwargs[ATTR_BRIGHTNESS]
-
-        if ATTR_COLOR_TEMP in kwargs:
-            command['ct'] = kwargs[ATTR_COLOR_TEMP]
 
         flash = kwargs.get(ATTR_FLASH)
 
@@ -400,7 +354,8 @@ class HueLight(Light):
         elif effect == EFFECT_RANDOM:
             command['hue'] = random.randrange(0, 65535)
             command['sat'] = random.randrange(150, 254)
-        elif self.bridge_type == 'hue':
+        elif (self.bridge_type == 'hue' and
+              self.info.get('manufacturername') == 'Philips'):
             command['effect'] = 'none'
 
         self._command_func(self.light_id, command)
@@ -410,9 +365,7 @@ class HueLight(Light):
         command = {'on': False}
 
         if ATTR_TRANSITION in kwargs:
-            # Transition time is in 1/10th seconds and cannot exceed
-            # 900 seconds.
-            command['transitiontime'] = min(9000, kwargs[ATTR_TRANSITION] * 10)
+            command['transitiontime'] = int(kwargs[ATTR_TRANSITION] * 10)
 
         flash = kwargs.get(ATTR_FLASH)
 
@@ -436,7 +389,8 @@ class HueLight(Light):
         """Return the device state attributes."""
         attributes = {}
         if not self.allow_in_emulated_hue:
-            attributes[ATTR_EMULATED_HUE] = self.allow_in_emulated_hue
+            attributes[ATTR_EMULATED_HUE_HIDDEN] = \
+                not self.allow_in_emulated_hue
         if self.is_group:
             attributes[ATTR_IS_HUE_GROUP] = self.is_group
         return attributes
